@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+.coverage
+.mypy_cache/
+
+# Data CSVs are NOT in this repo. They live on EDITO MinIO and are fetched at build time.
+data/exports/
+data.tar.gz
+
+# Editor + OS
+.vscode/
+.idea/
+.DS_Store
+
+# RAG runtime cache (regenerated from rag/ code)
+rag_cache/
+
+# Local env files
+.env
+.env.*
