@@ -55,6 +55,38 @@ Helm chart lives in the EDITO Onyxia catalog:
 
 Source: `gitlab.mercator-ocean.fr/pub/edito-infra/service-playground/charts/surimi-mcp`
 
+## Debugging a stuck or failed deploy
+
+The chart ships a diagnostic script at `/app/scripts/debug-mcp.sh` inside the image.
+It dumps helm status, pod descriptions, server logs, load-data Job logs, postgres
+logs, and recent namespace events in one shot. Run it from the terminal sidecar
+(or any pod with kubectl + helm access to the namespace):
+
+```
+kubectl exec -it <surimi-terminal-pod> -- bash /app/scripts/debug-mcp.sh
+```
+
+Or copy it out and run from a debugging pod:
+
+```
+kubectl cp <surimi-mcp-pod>:/app/scripts/debug-mcp.sh /tmp/debug-mcp.sh
+bash /tmp/debug-mcp.sh <release-name>
+```
+
+Quick manual checks:
+
+```
+helm status <release>                                          # release-level state
+kubectl get pod -l app.kubernetes.io/instance=<release>        # pod state
+kubectl describe pod <pod>                                     # why pending/crashed
+kubectl logs job/<release>-load-data -c load-csv --tail=200 -f # live data-load
+kubectl logs -l app.kubernetes.io/instance=<release> -c surimi-mcp --tail=80
+kubectl get events --sort-by=.lastTimestamp | tail -20
+```
+
+The image sets `PYTHONUNBUFFERED=1` so all `print()` output streams to logs in
+real time. No need to wait for the container to finish to see progress.
+
 ## Local dev
 
 ```

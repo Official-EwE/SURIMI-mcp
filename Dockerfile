@@ -10,16 +10,22 @@ LABEL org.opencontainers.image.documentation="https://www.surimi-project.eu/"
 
 WORKDIR /app
 
+# Unbuffered stdout/stderr so kubectl logs shows progress in real time
+# (the post-install load-data Job is the main place this matters).
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
 # Runtime deps. curl is needed for the data fetch below; kept because chart's load-data Job re-fetches.
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
       curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir fastmcp trino psycopg2-binary
 
-# Code: server, tools, loader, schemas
+# Code: server, tools, loader, schemas, debug helper
 COPY capabilities.py catalog.py trino_client.py search.py recipes.py server.py ./
 COPY data/load_csv.py data/load_csv.py
 COPY data/init/ data/init/
+COPY scripts/ /app/scripts/
 
 # Data: CSVs come from MinIO, not from this repo (per Rik's "data != image" rule).
 # Override at build time:  docker build --build-arg DATA_TARBALL_URL=... --build-arg DATA_TARBALL_SHA256=...

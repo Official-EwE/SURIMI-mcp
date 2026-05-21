@@ -1,9 +1,19 @@
-"""Load CSV exports into PostgreSQL. Auto-creates tables from CSV headers."""
+"""Load CSV exports into PostgreSQL. Auto-creates tables from CSV headers.
+
+Prints progress to stdout with explicit flushing so `kubectl logs -f` shows
+real-time activity. The Dockerfile sets PYTHONUNBUFFERED=1 as belt-and-braces.
+"""
 import csv
 import os
 import sys
+import time
 
 import psycopg2
+
+
+def log(msg: str) -> None:
+    print(f"[load_csv] {msg}", flush=True)
+
 
 DB_URL = os.environ.get(
     "DATABASE_URL",
@@ -29,18 +39,37 @@ CSV_TO_TABLE = {
 
 def main():
     export_dir = os.environ.get("CSV_DIR", "data/exports")
-    conn = psycopg2.connect(DB_URL)
+    log(f"starting; CSV_DIR={export_dir} tables={len(CSV_TO_TABLE)}")
+    safe_url = DB_URL.split("@")[-1] if "@" in DB_URL else DB_URL
+    log(f"connecting to postgres at {safe_url}...")
+
+    t_connect = time.time()
+    try:
+        conn = psycopg2.connect(DB_URL)
+    except Exception as e:
+        log(f"FATAL: connection failed: {e!r}")
+        sys.exit(1)
+    log(f"connected in {time.time() - t_connect:.1f}s")
+
     conn.autocommit = True
     cur = conn.cursor()
 
     for schema in ["oecd", "eu_dcf", "surimi"]:
         cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+        log(f"schema {schema} ready")
 
-    for csv_file, table in CSV_TO_TABLE.items():
+    total_rows = 0
+    t_start = time.time()
+
+    for i, (csv_file, table) in enumerate(CSV_TO_TABLE.items(), 1):
         path = os.path.join(export_dir, csv_file)
         if not os.path.exists(path):
-            print(f"SKIP {csv_file} (not found)")
+            log(f"[{i}/{len(CSV_TO_TABLE)}] SKIP {csv_file} (not found)")
             continue
+
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+        log(f"[{i}/{len(CSV_TO_TABLE)}] {table}: loading {csv_file} ({size_mb:.1f} MB)")
+        t_table = time.time()
 
         with open(path, "r") as f:
             reader = csv.reader(f)
@@ -63,15 +92,21 @@ def main():
                     cur.executemany(insert_sql, batch)
                     count += len(batch)
                     batch = []
+                    log(f"  {table}: {count:,} rows so far...")
             if batch:
                 cur.executemany(insert_sql, batch)
                 count += len(batch)
 
-        print(f"{table}: {count} rows loaded ({len(headers)} cols)")
+        dt = time.time() - t_table
+        rate = count / dt if dt > 0 else 0
+        log(f"  -> {table}: {count:,} rows, {len(headers)} cols, {dt:.1f}s ({rate:,.0f} rows/s)")
+        total_rows += count
 
     cur.close()
     conn.close()
-    print("done")
+
+    elapsed = time.time() - t_start
+    log(f"done. {total_rows:,} rows loaded across {len(CSV_TO_TABLE)} tables in {elapsed:.1f}s")
 
 
 if __name__ == "__main__":
