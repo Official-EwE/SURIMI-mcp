@@ -23,7 +23,7 @@ COPY data/init/ data/init/
 
 # Data: CSVs come from MinIO, not from this repo (per Rik's "data != image" rule).
 # Override at build time:  docker build --build-arg DATA_TARBALL_URL=... --build-arg DATA_TARBALL_SHA256=...
-ARG DATA_TARBALL_URL=https://minio.dive.edito.eu/project-surimi/surimi-data/data.tar.gz
+ARG DATA_TARBALL_URL=https://minio.dive.edito.eu/project-surimi/surimi-data-dummy/data.tar.gz
 ARG DATA_TARBALL_SHA256=5a44dc6c05a65a6ee342b5f7387f1b4a50f4b801b5cd9394f52552baf086f39c
 RUN mkdir -p data/exports \
     && curl -fsSL "$DATA_TARBALL_URL" -o /tmp/data.tar.gz \

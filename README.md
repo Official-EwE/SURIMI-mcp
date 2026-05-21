@@ -31,10 +31,12 @@ The image is **public** — no authentication needed to pull.
 ## Data
 
 The 13 CSV exports (~86 MB raw, ~5 MB compressed) are **not** stored in this repo. They live on
-EDITO MinIO under the shared SURIMI-project bucket, accessible to any project member without auth:
+EDITO MinIO under the shared SURIMI-project bucket. The prefix `surimi-data-dummy` reflects that
+the current snapshot is for demo/integration purposes only — not the canonical SURIMI dataset.
+Anonymous-pullable:
 
 ```
-https://minio.dive.edito.eu/project-surimi/surimi-data/data.tar.gz
+https://minio.dive.edito.eu/project-surimi/surimi-data-dummy/data.tar.gz
 ```
 
 The Dockerfile fetches + verifies them at build time. To rebuild with a different bundle:
