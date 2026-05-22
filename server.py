@@ -240,6 +240,52 @@ def generate_report(
     return recipes.generate_report(dataset_id, focus, period=period)
 
 
+# ── Status endpoint (non-MCP HTTP route) ──
+
+@mcp.custom_route("/status", methods=["GET"])
+async def status_endpoint(request):
+    """Per-table load progress for watching the data-load Job from a browser.
+
+    GET /status -> { ready, tables: { loaded, total, missing }, rows, details }.
+    Each table is probed with SELECT COUNT(*); a table that errors (relation
+    does not exist) counts as 'missing' which is the normal state during the
+    background data load.
+    """
+    from starlette.responses import JSONResponse
+
+    expected = [d["table"] for d in catalog.DATASETS]
+    client = _get_trino()
+
+    loaded: list[dict] = []
+    missing: list[str] = []
+    total = 0
+    for table in expected:
+        try:
+            result = client.execute(f"SELECT COUNT(*) AS n FROM {table}", limit=1)
+        except Exception as e:
+            return JSONResponse(
+                {"ready": False, "error": f"db unreachable: {e}"},
+                status_code=503,
+            )
+        if result.get("error"):
+            missing.append(table)
+        else:
+            n = result["rows"][0]["n"] if result["rows"] else 0
+            loaded.append({"table": table, "rows": n})
+            total += n
+
+    return JSONResponse({
+        "ready": len(missing) == 0,
+        "tables": {
+            "loaded": len(loaded),
+            "total": len(expected),
+            "missing": missing,
+        },
+        "rows": total,
+        "details": loaded,
+    })
+
+
 # ── Startup ──
 
 if __name__ == "__main__":
