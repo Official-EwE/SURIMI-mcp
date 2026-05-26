@@ -1,17 +1,22 @@
 [project]
 name = "surimi-mcp"
 version = "0.1.0"
-description = "MCP server exposing SURIMI fisheries and OECD data via Trino"
+description = "MCP server exposing SURIMI fisheries and OECD data + gridded netcdf via Trino, with HMAC-signed receipts."
 requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=2.0.0",
     "trino>=0.330",
+    "xarray>=2024.0",
+    "netcdf4>=1.7",
+    "h5py>=3.10",
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=4.0",
 ]
 
 [build-system]
