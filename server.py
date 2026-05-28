@@ -136,20 +136,9 @@ def list_columns(dataset_id: str) -> dict:
 
 # ── Fetcher tools ──
 
-@mcp.tool()
-def query_data(
-    sql: str,
-    limit: int = 500,
-) -> dict:
-    """Execute a SQL query against Trino. Returns rows as JSON.
-
-    Use SHOW COLUMNS FROM <table> to discover column names first.
-    Dot-notation columns (e.g. "country.code") must be double-quoted in SQL.
-    On column errors, returns available_columns for self-correction.
-    """
-    _log(f"[fetcher] query_data sql={sql[:80]}...")
-    client = _get_trino()
-    return client.execute(sql, limit=limit)
+# NOTE: there is no unsigned query_data tool. The only SQL path is the signed
+# query_data below (registered near the netcdf tools), so every numeric result
+# the LLM can surface carries an HMAC receipt. Trust is not optional.
 
 
 @mcp.tool()
@@ -259,15 +248,16 @@ _query_data_signed = make_query_data_signed(
 )
 
 
-@mcp.tool(name="query_data_signed")
-def query_data_signed(sql: str, limit: int = 500) -> dict:
-    """Execute a SQL query against Trino, returning rows + an HMAC-signed
-    receipt that lets any caller verify the result came from this server.
+@mcp.tool(name="query_data")
+def query_data(sql: str, limit: int = 500) -> dict:
+    """Execute a SQL query against Trino. Returns {value, receipt}.
 
-    Use this in place of query_data when the answer's numbers need to be
-    auditable. Same SQL semantics, output is {value, receipt}.
+    value holds rows/columns (and available_columns on a column error, for
+    self-correction). receipt is an HMAC signature over the inputs+output so
+    any number can be re-verified with nc_verify. Use SHOW COLUMNS FROM
+    <table> to discover names; double-quote dot-notation columns.
     """
-    _log(f"[fetcher signed] query_data_signed sql={sql[:80]}...")
+    _log(f"[fetcher signed] query_data sql={sql[:80]}...")
     return _query_data_signed(sql=sql, limit=limit)
 
 

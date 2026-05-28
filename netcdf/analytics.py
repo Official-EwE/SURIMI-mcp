@@ -10,14 +10,13 @@ Provenance is wrapped by the receipts module at the MCP tool layer.
 """
 from __future__ import annotations
 
-import hashlib
 import math
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import xarray as xr
 
+from netcdf import io as ncio
 from netcdf.regions import RegionMaskError, load_region_mask
 
 
@@ -29,21 +28,49 @@ _VALID_AGGS = {"mean", "sum", "max", "min"}
 
 
 def _file_sha256(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    try:
+        return ncio.resource_sha256(path)
+    except ncio.NetCDFIOError as exc:
+        raise AnalyticsError(str(exc)) from exc
 
 
 def _open(path: str) -> xr.Dataset:
-    p = Path(path)
-    if not p.exists():
-        raise AnalyticsError(f"file not found: {path}")
     try:
-        return xr.open_dataset(p, decode_times=False)
+        return ncio.open_dataset(path, decode_times=False)
+    except ncio.NetCDFIOError as exc:
+        raise AnalyticsError(str(exc)) from exc
+
+
+def _time_indices_for_year(ds: xr.Dataset, year: int) -> np.ndarray:
+    """Indices along the time axis whose decoded calendar year == year.
+
+    Dataset is opened with decode_times=False, so we decode the raw time
+    coordinate via CF units here (lazy enough; the time axis is small).
+    """
+    tname = None
+    for cand in ("time", "t", "T"):
+        if cand in ds.coords or cand in ds.dims:
+            tname = cand
+            break
+    if tname is None:
+        raise AnalyticsError("no time coordinate to filter by year")
+    t = ds[tname]
+    units = t.attrs.get("units")
+    if not units:
+        raise AnalyticsError(f"time coord '{tname}' has no units; cannot filter by year")
+    calendar = t.attrs.get("calendar", "standard")
+    try:
+        decoded = xr.coding.times.decode_cf_datetime(t.values, units, calendar)
     except Exception as exc:
-        raise AnalyticsError(f"could not open {path}: {exc}") from exc
+        raise AnalyticsError(f"could not decode time axis: {exc}") from exc
+    years = decoded.astype("datetime64[Y]").astype(int) + 1970
+    idx = np.where(years == year)[0]
+    if idx.size == 0:
+        raise AnalyticsError(
+            f"year {year} not present in time axis (range "
+            f"{int(years.min())}-{int(years.max())})"
+        )
+    return idx
 
 
 def _region_index(mask: dict[str, Any], region: str) -> int:
@@ -96,10 +123,13 @@ def top_regions(
     n: int,
     agg: str,
     mask_file: str,
+    year: int | None = None,
 ) -> dict[str, Any]:
-    """Top N regions by aggregated value of `var`.
+    """Top N regions by aggregated value of `var`, optionally within one year.
 
-    Returns rank-ordered list with values, plus provenance and coverage.
+    When `year` is given, only that calendar year's timesteps are loaded
+    (lazy .isel before .values), so global multi-decade files do not blow
+    memory. Returns rank-ordered list with values, provenance, coverage.
     """
     if agg not in _VALID_AGGS:
         raise AnalyticsError(f"unknown agg '{agg}', valid: {sorted(_VALID_AGGS)}")
@@ -115,8 +145,17 @@ def top_regions(
             raise AnalyticsError(
                 f"variable '{var}' not found; available: {list(ds.data_vars)}"
             )
-        data = ds[var].values
-        units = str(ds[var].attrs.get("units", ""))
+        var_da = ds[var]
+        units = str(var_da.attrs.get("units", ""))
+
+        n_timesteps = None
+        if year is not None:
+            idx = _time_indices_for_year(ds, year)
+            tdim = var_da.dims[0]  # time is the leading dim by convention
+            var_da = var_da.isel({tdim: idx})  # lazy
+            n_timesteps = int(idx.size)
+
+        data = var_da.values  # materialize only the (optionally subset) slice
 
     values, _ = _aggregate_per_region(data, mask_info["mask"], agg)
     nan_frac = float(np.isnan(data).sum() / max(1, data.size))
@@ -124,6 +163,13 @@ def top_regions(
     pairs = list(zip(mask_info["region_names"], values))
     pairs.sort(key=lambda p: (np.nan if np.isnan(p[1]) else -p[1]))
     top = pairs[: max(0, n)]
+
+    coverage: dict[str, Any] = {
+        "nan_fraction": nan_frac,
+        "n_regions_evaluated": mask_info["n_regions"],
+    }
+    if n_timesteps is not None:
+        coverage["n_timesteps"] = n_timesteps
 
     return {
         "result": [
@@ -136,11 +182,9 @@ def top_regions(
             "var": var,
             "agg": agg,
             "n_requested": n,
+            "year": year,
         },
-        "coverage": {
-            "nan_fraction": nan_frac,
-            "n_regions_evaluated": mask_info["n_regions"],
-        },
+        "coverage": coverage,
     }
 
 

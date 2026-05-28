@@ -72,7 +72,7 @@ def test_query_data_signed_receipt_tool_id():
 
     fn = make_query_data_signed(client_factory=_FakeClient)
     out = fn(sql="SELECT 1", limit=1)
-    assert out["receipt"]["tool_id"] == "query_data_signed"
+    assert out["receipt"]["tool_id"] == "query_data"
 
 
 def test_query_data_signed_rejects_tampered_rows():

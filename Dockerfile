@@ -23,7 +23,7 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir \
         fastmcp trino psycopg2-binary \
-        xarray netcdf4 h5py numpy
+        xarray netcdf4 h5py h5netcdf numpy s3fs
 
 # Code: server, tools, loader, schemas, debug helper
 COPY capabilities.py catalog.py trino_client.py search.py recipes.py server.py ./

@@ -7,41 +7,23 @@ used as a provenance field on analytical receipts.
 """
 from __future__ import annotations
 
-import hashlib
-import os
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import xarray as xr
+
+from netcdf import io as ncio
 
 
 class NetCDFInspectError(Exception):
     """Raised on inspection failure (missing file, unreadable, etc.)."""
 
 
-def _validate_path(path: str) -> Path:
-    p = Path(path)
-    if not p.exists():
-        raise NetCDFInspectError(f"file not found: {path}")
-    if not p.is_file():
-        raise NetCDFInspectError(f"not a file: {path}")
-    return p
-
-
-def _file_sha256(p: Path) -> str:
-    h = hashlib.sha256()
-    with open(p, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _open(p: Path) -> xr.Dataset:
+def _open(uri: str) -> xr.Dataset:
     try:
-        return xr.open_dataset(p, decode_times=False)
-    except Exception as exc:
-        raise NetCDFInspectError(f"could not open {p}: {exc}") from exc
+        return ncio.open_dataset(uri, decode_times=False)
+    except ncio.NetCDFIOError as exc:
+        raise NetCDFInspectError(str(exc)) from exc
 
 
 def describe_file(path: str) -> dict[str, Any]:
@@ -50,11 +32,10 @@ def describe_file(path: str) -> dict[str, Any]:
     Includes dimensions, variables (with shapes/dtypes/units), global
     attributes, and the file SHA-256 (used as provenance in receipts).
     """
-    p = _validate_path(path)
-    with _open(p) as ds:
+    with _open(path) as ds:
         return {
-            "file_path": str(p),
-            "file_sha256": _file_sha256(p),
+            "file_path": path,
+            "file_sha256": ncio.resource_sha256(path),
             "dimensions": {name: int(size) for name, size in ds.sizes.items()},
             "variables": _variable_list(ds),
             "global_attributes": _coerce_attrs(ds.attrs),
@@ -63,15 +44,13 @@ def describe_file(path: str) -> dict[str, Any]:
 
 def list_variables(path: str) -> list[dict[str, Any]]:
     """List data variables (excluding coordinates) with shape/dtype/units."""
-    p = _validate_path(path)
-    with _open(p) as ds:
+    with _open(path) as ds:
         return _variable_list(ds)
 
 
 def get_time_range(path: str) -> dict[str, Any]:
     """Return start/end of the time axis, with raw units. Does not decode times."""
-    p = _validate_path(path)
-    with _open(p) as ds:
+    with _open(path) as ds:
         time_name = _find_time_coord(ds)
         if time_name is None:
             raise NetCDFInspectError("no time coordinate found")
@@ -88,8 +67,7 @@ def get_time_range(path: str) -> dict[str, Any]:
 
 def get_spatial_bounds(path: str) -> dict[str, Any]:
     """Return lat/lon extents and grid sizes."""
-    p = _validate_path(path)
-    with _open(p) as ds:
+    with _open(path) as ds:
         lat_name = _find_coord(ds, ["lat", "latitude", "y"])
         lon_name = _find_coord(ds, ["lon", "longitude", "x"])
         if lat_name is None or lon_name is None:
@@ -115,8 +93,7 @@ def check_cf_compliance(path: str) -> dict[str, Any]:
     variables have units, lat/lon coords exist with proper units.
     Non-compliance is reported with specific missing fields, never raises.
     """
-    p = _validate_path(path)
-    with _open(p) as ds:
+    with _open(path) as ds:
         missing: list[str] = []
         warnings: list[str] = []
 
@@ -149,8 +126,7 @@ def get_coverage_summary(path: str) -> dict[str, Any]:
     Coverage gaps are surfaced explicitly so they cannot be silently
     skipped by aggregations.
     """
-    p = _validate_path(path)
-    with _open(p) as ds:
+    with _open(path) as ds:
         vars_out: list[dict[str, Any]] = []
         for name, var in ds.data_vars.items():
             arr = var.values
@@ -166,7 +142,7 @@ def get_coverage_summary(path: str) -> dict[str, Any]:
                 "n_nan": n_nan,
                 "nan_fraction": (n_nan / n_total) if n_total else 0.0,
             })
-        return {"file_path": str(p), "variables": vars_out}
+        return {"file_path": path, "variables": vars_out}
 
 
 # ---------- helpers ----------

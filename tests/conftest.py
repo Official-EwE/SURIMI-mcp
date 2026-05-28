@@ -65,6 +65,36 @@ def tiny_nc_no_cf(tmp_path: Path) -> str:
 
 
 @pytest.fixture
+def tiny_nc_multiyear(tmp_path: Path) -> str:
+    """6 monthly steps spanning 2009-2010 so year-filtering is observable.
+
+    biomass[t, lat, lon] = (t+1) * 100  (uniform per timestep)
+    timesteps: 3 in 2009 (Jan/Feb/Mar) then 3 in 2010 (Jan/Feb/Mar).
+    So year=2009 mean = mean(100,200,300)=200; year=2010 = mean(400,500,600)=500.
+    """
+    nlat, nlon = 3, 4
+    lat = np.linspace(-30.0, 30.0, nlat).astype("float32")
+    lon = np.linspace(-180.0, 180.0, nlon, endpoint=False).astype("float32")
+    # days since 2009-01-01 : 2009 Jan/Feb/Mar then 2010 Jan/Feb/Mar
+    time_idx = np.array([0, 31, 59, 365, 396, 424], dtype="float64")
+    biomass = np.zeros((6, nlat, nlon), dtype="float32")
+    for t in range(6):
+        biomass[t, :, :] = (t + 1) * 100.0
+
+    ds = xr.Dataset(
+        data_vars={"biomass": (("time", "lat", "lon"), biomass, {"units": "kg"})},
+        coords={
+            "time": ("time", time_idx, {"units": "days since 2009-01-01"}),
+            "lat": ("lat", lat), "lon": ("lon", lon),
+        },
+        attrs={"Conventions": "CF-1.8"},
+    )
+    path = tmp_path / "multiyear.nc"
+    ds.to_netcdf(path, format="NETCDF4")
+    return str(path)
+
+
+@pytest.fixture
 def tiny_region_mask(tmp_path: Path) -> str:
     """A region mask matching the tiny_nc grid: 2 regions splitting the longitude.
 

@@ -98,6 +98,47 @@ def test_top_regions_raises_on_unknown_agg(tiny_nc, tiny_region_mask):
         )
 
 
+def test_top_regions_year_filter_selects_only_that_year(tiny_nc_multiyear, tiny_region_mask):
+    """year=2010 must aggregate only the 2010 timesteps (mean 500), not all 6."""
+    out2010 = top_regions(
+        file=tiny_nc_multiyear, var="biomass", n=2, agg="mean",
+        mask_file=tiny_region_mask, year=2010,
+    )
+    assert out2010["result"][0]["value"] == pytest.approx(500.0, rel=1e-3)
+
+    out2009 = top_regions(
+        file=tiny_nc_multiyear, var="biomass", n=2, agg="mean",
+        mask_file=tiny_region_mask, year=2009,
+    )
+    assert out2009["result"][0]["value"] == pytest.approx(200.0, rel=1e-3)
+
+
+def test_top_regions_without_year_uses_all_timesteps(tiny_nc_multiyear, tiny_region_mask):
+    """No year => mean over all 6 steps = mean(100..600) = 350."""
+    out = top_regions(
+        file=tiny_nc_multiyear, var="biomass", n=2, agg="mean",
+        mask_file=tiny_region_mask,
+    )
+    assert out["result"][0]["value"] == pytest.approx(350.0, rel=1e-3)
+
+
+def test_top_regions_year_records_in_provenance(tiny_nc_multiyear, tiny_region_mask):
+    out = top_regions(
+        file=tiny_nc_multiyear, var="biomass", n=2, agg="mean",
+        mask_file=tiny_region_mask, year=2010,
+    )
+    assert out["provenance"]["year"] == 2010
+    assert out["coverage"]["n_timesteps"] == 3
+
+
+def test_top_regions_year_not_present_raises(tiny_nc_multiyear, tiny_region_mask):
+    with pytest.raises(AnalyticsError):
+        top_regions(
+            file=tiny_nc_multiyear, var="biomass", n=2, agg="mean",
+            mask_file=tiny_region_mask, year=1999,
+        )
+
+
 def test_top_regions_supports_sum_aggregation(tiny_nc, tiny_region_mask):
     """sum should add all cells * timesteps in each region."""
     out = top_regions(

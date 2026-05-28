@@ -27,7 +27,7 @@ def make_query_data_signed(
     import time).
     """
 
-    @with_receipt("query_data_signed")
+    @with_receipt("query_data")
     def query_data_signed(sql: str, limit: int = 500) -> dict[str, Any]:
         client = client_factory()
         result = client.execute(sql, limit=limit)
