@@ -41,6 +41,30 @@ def _open(path: str) -> xr.Dataset:
         raise AnalyticsError(str(exc)) from exc
 
 
+def _calendar_years(decoded: np.ndarray) -> np.ndarray:
+    """Calendar year per timestep, robust to non-standard calendars.
+
+    decode_cf_datetime returns datetime64[ns] for standard/proleptic_gregorian
+    calendars (and dates within the ~1678-2262 range), but an object array of
+    cftime objects for noleap/365_day/360_day/etc. The old
+    `.astype("datetime64[Y]")` path silently produced WRONG years for cftime
+    arrays (e.g. a 360_day axis read as 2014-2015 instead of 2009-2010), which
+    made year filtering select the wrong/empty slice. cftime objects expose a
+    correct `.year`, so use that for object arrays.
+    """
+    decoded = np.asarray(decoded)
+    if decoded.dtype == object:
+        try:
+            return np.array(
+                [d.year for d in decoded.ravel()]
+            ).reshape(decoded.shape)
+        except AttributeError as exc:
+            raise AnalyticsError(
+                f"could not extract calendar year from decoded time axis: {exc}"
+            ) from exc
+    return decoded.astype("datetime64[Y]").astype(int) + 1970
+
+
 def _time_indices_for_year(ds: xr.Dataset, year: int) -> np.ndarray:
     """Indices along the time axis whose decoded calendar year == year.
 
@@ -63,7 +87,7 @@ def _time_indices_for_year(ds: xr.Dataset, year: int) -> np.ndarray:
         decoded = xr.coding.times.decode_cf_datetime(t.values, units, calendar)
     except Exception as exc:
         raise AnalyticsError(f"could not decode time axis: {exc}") from exc
-    years = decoded.astype("datetime64[Y]").astype(int) + 1970
+    years = _calendar_years(decoded)
     idx = np.where(years == year)[0]
     if idx.size == 0:
         raise AnalyticsError(

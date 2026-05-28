@@ -1,19 +1,15 @@
-"""Load CSV exports into PostgreSQL. Auto-creates tables from CSV headers.
+"""Load CSV exports into PostgreSQL with inferred column types.
 
-Prints progress to stdout with explicit flushing so `kubectl logs -f` shows
-real-time activity. The Dockerfile sets PYTHONUNBUFFERED=1 as belt-and-braces.
+Columns are typed by scanning their values (BIGINT / DOUBLE PRECISION / TEXT)
+instead of forcing everything to TEXT. TEXT-typed numeric columns were the
+root cause of SQL failures in the chat UI: `SUM(employment_fte)` errored with
+"function sum(text) does not exist" and `WHERE year IN (2017, 2020)` errored
+with "operator does not exist: text = integer", so the model had to CAST on
+every query and frequently gave up. Inference is conservative: leading-zero
+codes (e.g. "007") and non-fractional code-like columns stay TEXT.
 """
 import csv
 import os
-import sys
-import time
-
-import psycopg2
-
-
-def log(msg: str) -> None:
-    print(f"[load_csv] {msg}", flush=True)
-
 
 DB_URL = os.environ.get(
     "DATABASE_URL",
@@ -37,76 +33,152 @@ CSV_TO_TABLE = {
 }
 
 
+# Non-finite float sentinels. Treated as missing (NULL) rather than letting
+# them coerce a column to float or get stored as Postgres NaN/Inf (which break
+# IS NULL and silently poison SUM/AVG just like the original TEXT bug did).
+_NONFINITE = {
+    "nan", "inf", "-inf", "+inf", "infinity", "-infinity", "+infinity",
+}
+
+_BIGINT_MIN = -(2 ** 63)
+_BIGINT_MAX = 2 ** 63 - 1
+
+
+class _ColTypeInference:
+    """Streaming type inference for one column.
+
+    A column is BIGINT only if every non-empty value is an integer that
+    round-trips exactly (so "007" or "+5" are rejected -> they are codes, not
+    numbers). It is DOUBLE PRECISION only if every value parses as float AND at
+    least one value is genuinely fractional (has '.', 'e', or 'E'); this stops
+    integer-looking code columns from being coerced to floats. Otherwise TEXT.
+    """
+
+    def __init__(self) -> None:
+        self.saw_value = False
+        self.could_int = True
+        self.could_float = True
+        self.saw_fractional = False
+
+    def update(self, v: str | None) -> None:
+        if v is None or v == "":
+            return
+        s = v.strip()
+        if s.lower() in _NONFINITE:
+            # Missing-value sentinel; don't let it dictate the column type.
+            return
+        self.saw_value = True
+        if self.could_int:
+            try:
+                iv = int(s)
+                if str(iv) != s or not (_BIGINT_MIN <= iv <= _BIGINT_MAX):
+                    self.could_int = False
+            except ValueError:
+                self.could_int = False
+        if self.could_float:
+            try:
+                float(s)
+                if any(c in s for c in ".eE"):
+                    self.saw_fractional = True
+            except ValueError:
+                self.could_float = False
+
+    def resolve(self) -> str:
+        if not self.saw_value:
+            return "TEXT"
+        if self.could_int:
+            return "BIGINT"
+        if self.could_float and self.saw_fractional:
+            return "DOUBLE PRECISION"
+        return "TEXT"
+
+
+def infer_pg_type(values) -> str:
+    """Infer the PostgreSQL column type for an iterable of raw string values."""
+    state = _ColTypeInference()
+    for v in values:
+        state.update(v)
+    return state.resolve()
+
+
+def _convert(value: str | None, pg_type: str):
+    """Convert a raw CSV string to the Python type matching the column."""
+    if value is None or value == "":
+        return None
+    s = value.strip()
+    if pg_type in ("BIGINT", "DOUBLE PRECISION"):
+        if s.lower() in _NONFINITE:
+            return None
+        return int(s) if pg_type == "BIGINT" else float(s)
+    return value
+
+
+def _infer_table_types(path: str) -> tuple[list[str], list[str]]:
+    """First pass: read headers and infer a PG type per column (O(1) memory)."""
+    with open(path, "r") as f:
+        reader = csv.reader(f)
+        headers = next(reader)
+        states = [_ColTypeInference() for _ in headers]
+        for row in reader:
+            for i in range(len(headers)):
+                if i < len(row):
+                    states[i].update(row[i])
+    return headers, [s.resolve() for s in states]
+
+
 def main():
+    import psycopg2
+
     export_dir = os.environ.get("CSV_DIR", "data/exports")
-    log(f"starting; CSV_DIR={export_dir} tables={len(CSV_TO_TABLE)}")
-    safe_url = DB_URL.split("@")[-1] if "@" in DB_URL else DB_URL
-    log(f"connecting to postgres at {safe_url}...")
-
-    t_connect = time.time()
-    try:
-        conn = psycopg2.connect(DB_URL)
-    except Exception as e:
-        log(f"FATAL: connection failed: {e!r}")
-        sys.exit(1)
-    log(f"connected in {time.time() - t_connect:.1f}s")
-
+    conn = psycopg2.connect(DB_URL)
     conn.autocommit = True
     cur = conn.cursor()
 
     for schema in ["oecd", "eu_dcf", "surimi"]:
         cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
-        log(f"schema {schema} ready")
 
-    total_rows = 0
-    t_start = time.time()
-
-    for i, (csv_file, table) in enumerate(CSV_TO_TABLE.items(), 1):
+    for csv_file, table in CSV_TO_TABLE.items():
         path = os.path.join(export_dir, csv_file)
         if not os.path.exists(path):
-            log(f"[{i}/{len(CSV_TO_TABLE)}] SKIP {csv_file} (not found)")
+            print(f"SKIP {csv_file} (not found)")
             continue
 
-        size_mb = os.path.getsize(path) / (1024 * 1024)
-        log(f"[{i}/{len(CSV_TO_TABLE)}] {table}: loading {csv_file} ({size_mb:.1f} MB)")
-        t_table = time.time()
+        headers, types = _infer_table_types(path)
+        ncol = len(headers)
+
+        cur.execute(f"DROP TABLE IF EXISTS {table}")
+        col_defs = ", ".join(f'"{h}" {t}' for h, t in zip(headers, types))
+        cur.execute(f"CREATE TABLE {table} ({col_defs})")
+
+        cols = ", ".join(f'"{h}"' for h in headers)
+        placeholders = ", ".join(["%s"] * ncol)
+        insert_sql = f"INSERT INTO {table} ({cols}) VALUES ({placeholders})"
 
         with open(path, "r") as f:
             reader = csv.reader(f)
-            headers = next(reader)
-
-            cur.execute(f"DROP TABLE IF EXISTS {table}")
-            col_defs = ", ".join(f'"{h}" TEXT' for h in headers)
-            cur.execute(f"CREATE TABLE {table} ({col_defs})")
-
-            cols = ", ".join(f'"{h}"' for h in headers)
-            placeholders = ", ".join(["%s"] * len(headers))
-            insert_sql = f"INSERT INTO {table} ({cols}) VALUES ({placeholders})"
-
+            next(reader)  # skip header
             batch = []
             count = 0
             for row in reader:
-                cleaned = [None if v == "" else v for v in row]
+                cleaned = [
+                    _convert(row[i] if i < len(row) else None, types[i])
+                    for i in range(ncol)
+                ]
                 batch.append(cleaned)
                 if len(batch) >= 10000:
                     cur.executemany(insert_sql, batch)
                     count += len(batch)
                     batch = []
-                    log(f"  {table}: {count:,} rows so far...")
             if batch:
                 cur.executemany(insert_sql, batch)
                 count += len(batch)
 
-        dt = time.time() - t_table
-        rate = count / dt if dt > 0 else 0
-        log(f"  -> {table}: {count:,} rows, {len(headers)} cols, {dt:.1f}s ({rate:,.0f} rows/s)")
-        total_rows += count
+        typed = sum(1 for t in types if t != "TEXT")
+        print(f"{table}: {count} rows loaded ({ncol} cols, {typed} typed numeric)")
 
     cur.close()
     conn.close()
-
-    elapsed = time.time() - t_start
-    log(f"done. {total_rows:,} rows loaded across {len(CSV_TO_TABLE)} tables in {elapsed:.1f}s")
+    print("done")
 
 
 if __name__ == "__main__":

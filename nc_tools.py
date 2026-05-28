@@ -12,7 +12,9 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from netcdf import analytics, discovery, inspect as nc_inspect
+import numpy as np
+
+from netcdf import analytics, discovery, inspect as nc_inspect, regions as nc_regions
 from receipts import verify_receipt
 from signed_tool import with_receipt
 
@@ -39,6 +41,26 @@ def nc_list_files(prefix: str | None = None) -> dict[str, Any]:
 
 
 # ---------- Inspection (unsigned) ----------
+
+def nc_list_regions(mask_file: str) -> dict[str, Any]:
+    """List the named regions in a mask file so you can pick a region by name.
+
+    Returns {mask_file, n_regions, regions:[{name, n_cells}]}. Call this BEFORE
+    nc_time_series or nc_trend (which take a region NAME), and to know which
+    regions nc_top_regions will rank. Do NOT guess region names or call
+    nc_top_regions on the mask itself to discover them.
+    """
+    mask = nc_regions.load_region_mask(mask_file)
+    regions = [
+        {"name": name, "n_cells": int(np.sum(mask["mask"][i] > 0))}
+        for i, name in enumerate(mask["region_names"])
+    ]
+    return {
+        "mask_file": mask_file,
+        "n_regions": mask["n_regions"],
+        "regions": regions,
+    }
+
 
 def nc_describe_file(path: str) -> dict[str, Any]:
     """Return the full structure of a netcdf file (dims, vars, attrs, sha256)."""
@@ -96,6 +118,7 @@ def nc_verify(receipt: dict[str, Any]) -> dict[str, Any]:
 
 TOOLS = [
     "nc_list_files",
+    "nc_list_regions",
     "nc_describe_file",
     "nc_list_variables",
     "nc_get_time_range",
