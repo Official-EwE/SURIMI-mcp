@@ -27,7 +27,7 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 
 # Code: server, tools, loader, schemas, debug helper
 COPY capabilities.py catalog.py trino_client.py search.py recipes.py server.py ./
-COPY receipts.py signed_tool.py citation_gate.py nc_tools.py sql_tools.py ./
+COPY receipts.py signed_tool.py citation_gate.py nc_tools.py sql_tools.py app_factory.py ./
 COPY netcdf/ ./netcdf/
 COPY data/load_csv.py data/load_csv.py
 COPY data/init/ data/init/

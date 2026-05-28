@@ -282,5 +282,9 @@ if __name__ == "__main__":
     if not _drift["missing_from_registry"] and not _drift["missing_from_fastmcp"]:
         _log(f"drift check OK ({len(_tools)} tools, {len(capabilities.all_capabilities())} sources)")
 
-    _log(f"starting MCP server on {HOST}:{PORT}{PATH}")
-    mcp.run(transport="sse", host=HOST, port=PORT, path=PATH)
+    import uvicorn
+    from app_factory import build_asgi_app
+
+    _log(f"starting MCP server on {HOST}:{PORT} (streamable-http at /mcp, sse at /sse)")
+    app = build_asgi_app(mcp, http_path="/mcp", sse_path="/sse")
+    uvicorn.run(app, host=HOST, port=PORT)
