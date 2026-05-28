@@ -362,37 +362,31 @@ def compare_periods(
     }
 
 
-def nc_trend(
-    file: str,
-    var: str,
-    region: str,
-    mask_file: str,
-) -> dict[str, Any]:
-    """Estimate a monotonic trend with Mann-Kendall + linear slope.
+def _mann_kendall_trend(values: np.ndarray) -> dict[str, Any]:
+    """Mann-Kendall trend + linear slope over `values`, ignoring NaN gaps.
 
-    PREFERRED for "is X increasing/decreasing", "what is the trend", or "how has
-    X changed over time" questions. Returns a compact result: slope (linear
-    regression on time index), Mann-Kendall p_value, a categorical direction
-    (increasing/decreasing/no_trend), and n. Answer directly from these fields.
+    Real series have missing months (NaN); the previous `int(np.sign(...))` on a
+    NaN difference raised "cannot convert float NaN to integer" and crashed the
+    whole tool. Non-finite values are dropped first. The slope regresses on the
+    ORIGINAL index positions (gaps preserved) so a missing month still counts as
+    elapsed time. Returns {slope, p_value, direction, n} where n is the number
+    of valid (finite) points actually used.
     """
-    ts = time_series(
-        file=file, var=var, region=region,
-        agg_per_step="mean", mask_file=mask_file,
-    )
-    values = np.array([p["value"] for p in ts["points"]])
-    n = len(values)
+    arr = np.asarray(values, dtype=float)
+    positions = np.arange(arr.size, dtype=float)
+    finite = np.isfinite(arr)
+    v = arr[finite]
+    x = positions[finite]
+    n = int(v.size)
     if n < 3:
-        raise AnalyticsError("need at least 3 timesteps for trend")
+        raise AnalyticsError("need at least 3 valid (non-NaN) timesteps for trend")
 
-    # Linear slope
-    x = np.arange(n, dtype=float)
-    slope = float(np.polyfit(x, values, 1)[0])
+    slope = float(np.polyfit(x, v, 1)[0])
 
-    # Mann-Kendall statistic S
     s_stat = 0
     for i in range(n):
         for j in range(i + 1, n):
-            s_stat += int(np.sign(values[j] - values[i]))
+            s_stat += int(np.sign(v[j] - v[i]))
     var_s = n * (n - 1) * (2 * n + 5) / 18.0
     if s_stat > 0:
         z = (s_stat - 1) / math.sqrt(var_s)
@@ -408,11 +402,35 @@ def nc_trend(
     else:
         direction = "no_trend"
 
+    return {"slope": slope, "p_value": p_value, "direction": direction, "n": n}
+
+
+def nc_trend(
+    file: str,
+    var: str,
+    region: str,
+    mask_file: str,
+) -> dict[str, Any]:
+    """Estimate a monotonic trend with Mann-Kendall + linear slope.
+
+    PREFERRED for "is X increasing/decreasing", "what is the trend", or "how has
+    X changed over time" questions. Returns a compact result: slope (linear
+    regression on time index), Mann-Kendall p_value, a categorical direction
+    (increasing/decreasing/no_trend), n (valid points), and n_missing (NaN gaps
+    skipped). Answer directly from these fields.
+    """
+    ts = time_series(
+        file=file, var=var, region=region,
+        agg_per_step="mean", mask_file=mask_file,
+    )
+    all_values = [p["value"] for p in ts["points"]]
+    n_total = len(all_values)
+    result = _mann_kendall_trend(np.array(all_values, dtype=float))
+
     return {
-        "slope": slope,
-        "p_value": p_value,
-        "direction": direction,
-        "n": n,
+        **result,
+        "n_total": n_total,
+        "n_missing": n_total - result["n"],
         "provenance": {
             **ts["provenance"],
             "method": "mann_kendall",
