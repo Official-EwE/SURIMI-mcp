@@ -16,9 +16,10 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # Runtime deps. curl is needed for the data fetch below; kept because chart's load-data Job re-fetches.
-# libhdf5 / libnetcdf for h5py + netCDF4 wheels at runtime.
+# h5py + netCDF4 manylinux wheels bundle their own HDF5/netcdf shared libs,
+# so no apt hdf5/netcdf packages are needed.
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-      curl ca-certificates libhdf5-103-1t64 libnetcdf19 \
+      curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir \
         fastmcp trino psycopg2-binary \
