@@ -97,6 +97,44 @@ def _time_indices_for_year(ds: xr.Dataset, year: int) -> np.ndarray:
     return idx
 
 
+def _series_summary(points: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compact descriptive summary of a time series.
+
+    A raw 240-point series fed back to the LLM frequently produced NO final
+    answer (the model never reduced it). This pre-reduces the series so the
+    model can always state start/end/min/max/mean + a descriptive slope without
+    iterating points. NaN steps (real data gaps) are excluded; if every step is
+    missing, only the counts are returned (no value_* fields, never raises).
+    """
+    n_points = len(points)
+    vals = np.array([p["value"] for p in points], dtype=float)
+    finite = np.isfinite(vals)
+    n_valid = int(finite.sum())
+    summary: dict[str, Any] = {"n_points": n_points, "n_valid": n_valid}
+    if n_valid == 0:
+        summary["note"] = "all timesteps are missing (NaN)"
+        return summary
+
+    v = vals[finite]
+    if n_valid >= 2:
+        slope = float(np.polyfit(np.arange(n_valid, dtype=float), v, 1)[0])
+    else:
+        slope = 0.0
+    direction = "increasing" if slope > 0 else "decreasing" if slope < 0 else "flat"
+    summary.update(
+        {
+            "value_start": float(v[0]),
+            "value_end": float(v[-1]),
+            "value_min": float(v.min()),
+            "value_max": float(v.max()),
+            "value_mean": float(v.mean()),
+            "slope_per_step": slope,
+            "direction": direction,
+        }
+    )
+    return summary
+
+
 def _region_index(mask: dict[str, Any], region: str) -> int:
     try:
         return mask["region_names"].index(region)
@@ -219,7 +257,15 @@ def time_series(
     agg_per_step: str,
     mask_file: str,
 ) -> dict[str, Any]:
-    """Time series of `var` aggregated per timestep within one region."""
+    """Time series of `var` aggregated per timestep within one region.
+
+    Returns a compact `summary` (n_points, n_valid, value_start/end/min/max/mean,
+    slope_per_step, direction) AND the raw `points`. Answer from `summary` -- do
+    NOT enumerate the points. For "is it increasing/decreasing", "what is the
+    trend", or "how has it changed over time" questions, prefer `nc_trend`
+    (adds a significance test); use this tool when the caller wants the actual
+    series or explicit start-vs-end values.
+    """
     mask_info = load_region_mask(mask_file)
     r_idx = _region_index(mask_info, region)
 
@@ -249,6 +295,7 @@ def time_series(
             points.append({"t": ts, "value": val})
 
     return {
+        "summary": _series_summary(points),
         "points": points,
         "provenance": {
             "file_sha256": _file_sha256(file),
@@ -323,8 +370,10 @@ def nc_trend(
 ) -> dict[str, Any]:
     """Estimate a monotonic trend with Mann-Kendall + linear slope.
 
-    Returns slope (linear regression on time index) + Mann-Kendall p-value
-    + a categorical direction.
+    PREFERRED for "is X increasing/decreasing", "what is the trend", or "how has
+    X changed over time" questions. Returns a compact result: slope (linear
+    regression on time index), Mann-Kendall p_value, a categorical direction
+    (increasing/decreasing/no_trend), and n. Answer directly from these fields.
     """
     ts = time_series(
         file=file, var=var, region=region,
