@@ -24,10 +24,40 @@ class NetCDFIOError(Exception):
 
 _S3_PREFIX = "s3://"
 _FILE_PREFIX = "file://"
+_CACHE_DIR = os.environ.get("SURIMI_NC_CACHE", "/tmp/surimi-s3cache")
 
 
 def is_s3_uri(uri: str) -> bool:
     return uri.startswith(_S3_PREFIX)
+
+
+def _localize(uri: str) -> str:
+    """Return a local filesystem path for `uri`.
+
+    For s3:// the object is downloaded once to a content-addressed cache file
+    (streamed to disk by s3fs, so RAM stays bounded) and reused. HDF5/netcdf
+    need efficient random seeks, which only work well on a local file, NOT on
+    a streamed S3 handle (that buffers the whole object in memory and OOMs).
+    """
+    if not is_s3_uri(uri):
+        return _strip_file_scheme(uri)
+
+    import hashlib
+
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    key = hashlib.sha256(uri.encode("utf-8")).hexdigest()[:16]
+    local = os.path.join(_CACHE_DIR, f"{key}.nc")
+    if not os.path.exists(local):
+        fs = _s3_filesystem()
+        tmp = local + ".part"
+        try:
+            fs.get_file(uri, tmp)        # streams to disk in chunks, bounded RAM
+            os.replace(tmp, local)       # atomic; avoids half-downloaded cache hits
+        except Exception as exc:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise NetCDFIOError(f"could not download {uri}: {exc}") from exc
+    return local
 
 
 def _strip_file_scheme(uri: str) -> str:
@@ -59,18 +89,10 @@ def _s3_filesystem():
 def open_dataset(uri: str, **kwargs: Any) -> xr.Dataset:
     """Open a netcdf dataset from a local path or s3:// URI.
 
-    For S3 the object is opened as a streaming file handle and read with the
-    h5netcdf engine (works on NETCDF4/HDF5 files without a local copy).
+    s3:// is downloaded to a local cache file first (see _localize), then
+    opened locally so HDF5 random access is efficient and memory bounded.
     """
-    if is_s3_uri(uri):
-        fs = _s3_filesystem()
-        try:
-            handle = fs.open(uri, "rb")
-            return xr.open_dataset(handle, engine="h5netcdf", **kwargs)
-        except Exception as exc:
-            raise NetCDFIOError(f"could not open {uri}: {exc}") from exc
-
-    path = Path(_strip_file_scheme(uri))
+    path = Path(_localize(uri))
     if not path.exists():
         raise NetCDFIOError(f"file not found: {uri}")
     if not path.is_file():
@@ -82,16 +104,12 @@ def open_dataset(uri: str, **kwargs: Any) -> xr.Dataset:
 
 
 def resource_sha256(uri: str) -> str:
-    """SHA-256 of the resource bytes (used as provenance in receipts)."""
-    if is_s3_uri(uri):
-        fs = _s3_filesystem()
-        try:
-            data = fs.cat_file(uri)
-        except Exception as exc:
-            raise NetCDFIOError(f"could not read {uri}: {exc}") from exc
-        return hashlib.sha256(data).hexdigest()
+    """SHA-256 of the resource bytes (used as provenance in receipts).
 
-    path = Path(_strip_file_scheme(uri))
+    Streams from the local (or localized-from-S3) file in chunks so a large
+    object is never fully held in RAM.
+    """
+    path = Path(_localize(uri))
     if not path.exists():
         raise NetCDFIOError(f"file not found: {uri}")
     h = hashlib.sha256()

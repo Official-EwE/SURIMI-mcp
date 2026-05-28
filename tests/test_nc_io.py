@@ -56,39 +56,55 @@ def test_is_s3_uri():
     assert ncio.is_s3_uri("file:///tmp/local.nc") is False
 
 
-def test_open_dataset_s3_uses_s3fs(monkeypatch, tiny_nc):
-    """s3:// dispatch should build an S3 filesystem from env creds and
-    open the object as a file handle. We fake s3fs to return the local
-    fixture's bytes so we can assert the dispatch path without a real bucket."""
+def _fake_s3fs(monkeypatch, tiny_nc, captured, cache_dir):
+    """Install a fake s3fs whose get_file copies the local fixture, and point
+    the cache at a tmp dir so downloads land there."""
+    import shutil
+    import types
+
     monkeypatch.setenv("AWS_ENDPOINT_URL", "https://minio.test")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "k")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s")
-
-    captured = {}
+    monkeypatch.setattr(ncio, "_CACHE_DIR", str(cache_dir))
 
     class _FakeFS:
         def __init__(self, **kwargs):
             captured["kwargs"] = kwargs
 
-        def open(self, uri, mode="rb"):
-            captured["opened"] = uri
-            return open(tiny_nc, "rb")
+        def get_file(self, uri, local):
+            captured["downloaded"] = uri
+            shutil.copy(tiny_nc, local)
 
         def exists(self, uri):
             return True
 
-        def cat_file(self, uri):
-            return open(tiny_nc, "rb").read()
+    monkeypatch.setitem(
+        __import__("sys").modules, "s3fs",
+        types.SimpleNamespace(S3FileSystem=_FakeFS),
+    )
 
-    import types
-    fake_s3fs = types.SimpleNamespace(S3FileSystem=_FakeFS)
-    monkeypatch.setitem(__import__("sys").modules, "s3fs", fake_s3fs)
+
+def test_open_dataset_s3_downloads_then_opens(monkeypatch, tiny_nc, tmp_path):
+    """s3:// should download via s3fs.get_file to the local cache, then open."""
+    captured = {}
+    _fake_s3fs(monkeypatch, tiny_nc, captured, tmp_path / "cache")
 
     with ncio.open_dataset("s3://project-surimi/NetCDF/x.nc") as ds:
         assert "biomass" in ds.data_vars
-    assert captured["opened"] == "s3://project-surimi/NetCDF/x.nc"
-    # endpoint_url must be passed through to the S3 client
+    assert captured["downloaded"] == "s3://project-surimi/NetCDF/x.nc"
     assert captured["kwargs"]["client_kwargs"]["endpoint_url"] == "https://minio.test"
+
+
+def test_open_dataset_s3_caches_second_call(monkeypatch, tiny_nc, tmp_path):
+    """Second open of the same URI must NOT re-download (cache hit)."""
+    captured = {}
+    _fake_s3fs(monkeypatch, tiny_nc, captured, tmp_path / "cache")
+    with ncio.open_dataset("s3://b/k.nc"):
+        pass
+    captured["downloaded"] = None  # reset
+    with ncio.open_dataset("s3://b/k.nc"):
+        pass
+    assert captured["downloaded"] is None  # no second download
 
 
 def test_open_dataset_s3_raises_without_endpoint(monkeypatch):
@@ -97,23 +113,8 @@ def test_open_dataset_s3_raises_without_endpoint(monkeypatch):
         ncio.open_dataset("s3://bucket/key.nc")
 
 
-def test_resource_sha256_s3(monkeypatch, tiny_nc):
-    monkeypatch.setenv("AWS_ENDPOINT_URL", "https://minio.test")
+def test_resource_sha256_s3(monkeypatch, tiny_nc, tmp_path):
+    captured = {}
+    _fake_s3fs(monkeypatch, tiny_nc, captured, tmp_path / "cache")
     expected = hashlib.sha256(open(tiny_nc, "rb").read()).hexdigest()
-
-    class _FakeFS:
-        def __init__(self, **kwargs):
-            pass
-
-        def cat_file(self, uri):
-            return open(tiny_nc, "rb").read()
-
-        def exists(self, uri):
-            return True
-
-    import types
-    monkeypatch.setitem(
-        __import__("sys").modules, "s3fs",
-        types.SimpleNamespace(S3FileSystem=_FakeFS),
-    )
     assert ncio.resource_sha256("s3://b/k.nc") == expected
