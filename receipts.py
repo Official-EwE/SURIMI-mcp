@@ -22,10 +22,11 @@ Usage:
 """
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import hmac
 import json
-from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 
@@ -37,29 +38,48 @@ class ReceiptError(ValueError):
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _coerce(obj: Any) -> Any:
+    """Recursively convert DB-native types into JSON-native, deterministic forms.
+
+    Decimal -> str (exact, avoids float rounding drift across runs)
+    datetime / date -> ISO 8601 string
+    dict / list / tuple -> recursed
+    str / int / float / bool / None -> unchanged
+    Anything else raises ReceiptError (truly opaque values must fail loudly).
+
+    Run at issue time so the STORED receipt is JSON-serializable too, not just
+    the bytes we sign. Otherwise the MCP layer chokes returning the receipt.
+    """
+    if obj is None or isinstance(obj, (str, bool, int, float)):
+        return obj
+    if isinstance(obj, Decimal):
+        return str(obj)
+    if isinstance(obj, (_dt.datetime, _dt.date)):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {str(k): _coerce(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_coerce(v) for v in obj]
+    raise ReceiptError(
+        f"value of type {type(obj).__name__} is not serializable for a receipt"
+    )
 
 
 def _canonical_bytes(payload: dict[str, Any]) -> bytes:
     """Deterministic JSON serialization for signing.
 
-    Sorted keys, separators with no whitespace, ensure_ascii=False.
+    Sorted keys, separators with no whitespace, ensure_ascii=False. The
+    payload is already _coerce-d, so json.dumps never hits an opaque type.
     """
-    try:
-        return json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            default=_unjsonable,
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise ReceiptError(f"payload not serializable: {exc}") from exc
-
-
-def _unjsonable(obj: Any) -> Any:
-    """json.dumps default hook. Raise so non-serializable objects fail loudly."""
-    raise TypeError(f"value of type {type(obj).__name__} is not JSON serializable")
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
 
 
 def _sign(payload: dict[str, Any], secret: bytes) -> str:
@@ -83,12 +103,12 @@ def issue_receipt(
     body: dict[str, Any] = {
         "version": SCHEMA_VERSION,
         "tool_id": tool_id,
-        "input_params": input_params,
-        "output_value": output_value,
+        "input_params": _coerce(input_params),
+        "output_value": _coerce(output_value),
         "timestamp": timestamp or _now_iso(),
     }
     if provenance is not None:
-        body["provenance"] = provenance
+        body["provenance"] = _coerce(provenance)
 
     body["signature"] = _sign(body, secret)
     return body

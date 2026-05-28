@@ -195,3 +195,59 @@ def test_verify_receipt_raises_on_empty_secret():
     r = issue_receipt(tool_id="x", input_params={}, output_value=1, secret=SECRET)
     with pytest.raises(ReceiptError):
         verify_receipt(r, secret=b"")
+
+
+# ---------- DB-native types (Decimal, datetime) ----------
+
+def test_issue_receipt_handles_decimal_output():
+    """Trino/Postgres return Decimal for numeric columns; must serialize."""
+    from decimal import Decimal
+    r = issue_receipt(
+        tool_id="query_data_signed",
+        input_params={"sql": "SELECT SUM(x)"},
+        output_value={"rows": [{"total": Decimal("42.50")}]},
+        secret=SECRET,
+    )
+    # Decimal becomes its string form (deterministic, exact)
+    assert r["output_value"]["rows"][0]["total"] == "42.50"
+    assert verify_receipt(r, secret=SECRET)["verified"] is True
+
+
+def test_issue_receipt_handles_datetime_output():
+    import datetime
+    r = issue_receipt(
+        tool_id="query_data_signed",
+        input_params={},
+        output_value={"ts": datetime.datetime(2026, 5, 28, 7, 12, 0)},
+        secret=SECRET,
+    )
+    assert r["output_value"]["ts"].startswith("2026-05-28T07:12:00")
+    assert verify_receipt(r, secret=SECRET)["verified"] is True
+
+
+def test_issue_receipt_handles_date_output():
+    import datetime
+    r = issue_receipt(
+        tool_id="x", input_params={},
+        output_value={"d": datetime.date(2026, 5, 28)},
+        secret=SECRET,
+    )
+    assert r["output_value"]["d"] == "2026-05-28"
+
+
+def test_decimal_serialization_is_deterministic():
+    """Same Decimal value must produce the same signature across calls."""
+    from decimal import Decimal
+    ts = "2026-05-28T00:00:00Z"
+    r1 = issue_receipt(tool_id="x", input_params={}, output_value=Decimal("1.10"),
+                       secret=SECRET, timestamp=ts)
+    r2 = issue_receipt(tool_id="x", input_params={}, output_value=Decimal("1.10"),
+                       secret=SECRET, timestamp=ts)
+    assert r1["signature"] == r2["signature"]
+
+
+def test_still_raises_on_truly_unserializable():
+    """object() has no JSON form; must still raise (regression guard)."""
+    with pytest.raises(ReceiptError):
+        issue_receipt(tool_id="x", input_params={},
+                      output_value={"o": object()}, secret=SECRET)
