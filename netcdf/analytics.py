@@ -203,23 +203,26 @@ def time_series(
     with ds:
         if var not in ds.data_vars:
             raise AnalyticsError(f"variable '{var}' not found")
-        data = ds[var].values
+        var_da = ds[var]
+        if var_da.ndim < 3:
+            raise AnalyticsError(
+                f"variable '{var}' must have at least 3 dims (time, lat, lon); "
+                f"got {var_da.ndim}"
+            )
+        tdim = var_da.dims[0]
+        n_steps = var_da.sizes[tdim]
         time_values = ds["time"].values if "time" in ds else None
 
-    if data.ndim < 3:
-        raise AnalyticsError(
-            f"variable '{var}' must have at least 3 dims (time, lat, lon); got {data.ndim}"
-        )
-
-    region_mask = mask_info["mask"][r_idx]
-    points: list[dict[str, Any]] = []
-    n_steps = data.shape[0]
-    for t in range(n_steps):
-        slab = data[t]
-        weighted = np.where(region_mask > 0, slab, np.nan)
-        val = _apply_agg(weighted, agg_per_step)
-        ts = float(time_values[t]) if time_values is not None else float(t)
-        points.append({"t": ts, "value": val})
+        region_mask = mask_info["mask"][r_idx]
+        points: list[dict[str, Any]] = []
+        # Load one timestep at a time (a few MB each) instead of the whole
+        # variable, so global multi-decade files do not OOM.
+        for t in range(n_steps):
+            slab = var_da.isel({tdim: t}).values
+            weighted = np.where(region_mask > 0, slab, np.nan)
+            val = _apply_agg(weighted, agg_per_step)
+            ts = float(time_values[t]) if time_values is not None else float(t)
+            points.append({"t": ts, "value": val})
 
     return {
         "points": points,
@@ -251,16 +254,18 @@ def compare_periods(
 
     mask_info = load_region_mask(mask_file)
 
+    a0, a1 = period_a
+    b0, b1 = period_b
+
     ds = _open(file)
     with ds:
         if var not in ds.data_vars:
             raise AnalyticsError(f"variable '{var}' not found")
-        data = ds[var].values
-
-    a0, a1 = period_a
-    b0, b1 = period_b
-    slab_a = data[a0 : a1 + 1].mean(axis=0)
-    slab_b = data[b0 : b1 + 1].mean(axis=0)
+        var_da = ds[var]
+        tdim = var_da.dims[0]
+        # Load only the two period slabs, time-averaged, not the whole var.
+        slab_a = var_da.isel({tdim: slice(a0, a1 + 1)}).mean(dim=tdim).values
+        slab_b = var_da.isel({tdim: slice(b0, b1 + 1)}).mean(dim=tdim).values
 
     a_vals, _ = _aggregate_per_region(slab_a, mask_info["mask"], "mean")
     b_vals, _ = _aggregate_per_region(slab_b, mask_info["mask"], "mean")
