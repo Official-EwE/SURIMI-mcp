@@ -240,50 +240,35 @@ def generate_report(
     return recipes.generate_report(dataset_id, focus, period=period)
 
 
-# ── Status endpoint (non-MCP HTTP route) ──
+# ── NetCDF tools (inspection + signed analytics + verify) ──
 
-@mcp.custom_route("/status", methods=["GET"])
-async def status_endpoint(request):
-    """Per-table load progress for watching the data-load Job from a browser.
+import nc_tools as _nc
 
-    GET /status -> { ready, tables: { loaded, total, missing }, rows, details }.
-    Each table is probed with SELECT COUNT(*); a table that errors (relation
-    does not exist) counts as 'missing' which is the normal state during the
-    background data load.
+for _name in _nc.TOOLS:
+    _fn = getattr(_nc, _name)
+    mcp.tool(name=_name)(_fn)
+
+
+# ── Signed SQL tool ──
+
+from sql_tools import make_query_data_signed
+
+_query_data_signed = make_query_data_signed(
+    client_factory=_get_trino,
+    backend_id="trino://hive@127.0.0.1:8081",
+)
+
+
+@mcp.tool(name="query_data_signed")
+def query_data_signed(sql: str, limit: int = 500) -> dict:
+    """Execute a SQL query against Trino, returning rows + an HMAC-signed
+    receipt that lets any caller verify the result came from this server.
+
+    Use this in place of query_data when the answer's numbers need to be
+    auditable. Same SQL semantics, output is {value, receipt}.
     """
-    from starlette.responses import JSONResponse
-
-    expected = [d["table"] for d in catalog.DATASETS]
-    client = _get_trino()
-
-    loaded: list[dict] = []
-    missing: list[str] = []
-    total = 0
-    for table in expected:
-        try:
-            result = client.execute(f"SELECT COUNT(*) AS n FROM {table}", limit=1)
-        except Exception as e:
-            return JSONResponse(
-                {"ready": False, "error": f"db unreachable: {e}"},
-                status_code=503,
-            )
-        if result.get("error"):
-            missing.append(table)
-        else:
-            n = result["rows"][0]["n"] if result["rows"] else 0
-            loaded.append({"table": table, "rows": n})
-            total += n
-
-    return JSONResponse({
-        "ready": len(missing) == 0,
-        "tables": {
-            "loaded": len(loaded),
-            "total": len(expected),
-            "missing": missing,
-        },
-        "rows": total,
-        "details": loaded,
-    })
+    _log(f"[fetcher signed] query_data_signed sql={sql[:80]}...")
+    return _query_data_signed(sql=sql, limit=limit)
 
 
 # ── Startup ──

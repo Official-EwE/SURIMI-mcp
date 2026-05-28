@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="SURIMI-mcp"
-LABEL org.opencontainers.image.description="SURIMI fisheries-data MCP server. Exposes 10 tools (list_datasets, list_columns, query_data, describe_table, explain_indicator, search_documents, analyze_trend, compare_countries, generate_report, describe_capabilities) over SSE for any MCP-compatible LLM client. Backs against PostgreSQL or Trino. CSV data bundle is fetched from EDITO MinIO at build time (not baked into source)."
+LABEL org.opencontainers.image.description="SURIMI fisheries-data MCP server. Exposes 22 tools across tabular SQL (10), gridded netcdf (11), and signed SQL (1) over SSE for any MCP-compatible LLM client. Analytical outputs carry HMAC-signed receipts (arxiv 2603.10060) so any number can be re-verified. CSV data bundle is fetched from EDITO MinIO at build time (not baked into source)."
 LABEL org.opencontainers.image.source="https://github.com/Official-EwE/SURIMI-mcp"
 LABEL org.opencontainers.image.url="https://www.surimi-project.eu/"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
@@ -16,13 +16,18 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # Runtime deps. curl is needed for the data fetch below; kept because chart's load-data Job re-fetches.
+# libhdf5 / libnetcdf for h5py + netCDF4 wheels at runtime.
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-      curl ca-certificates \
+      curl ca-certificates libhdf5-103-1t64 libnetcdf19 \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir fastmcp trino psycopg2-binary
+    && pip install --no-cache-dir \
+        fastmcp trino psycopg2-binary \
+        xarray netcdf4 h5py numpy
 
 # Code: server, tools, loader, schemas, debug helper
 COPY capabilities.py catalog.py trino_client.py search.py recipes.py server.py ./
+COPY receipts.py signed_tool.py citation_gate.py nc_tools.py sql_tools.py ./
+COPY netcdf/ ./netcdf/
 COPY data/load_csv.py data/load_csv.py
 COPY data/init/ data/init/
 COPY scripts/ /app/scripts/
