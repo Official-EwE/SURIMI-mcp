@@ -126,3 +126,37 @@ def exists(uri: str) -> bool:
         except NetCDFIOError:
             return False
     return Path(_strip_file_scheme(uri)).exists()
+
+
+def list_objects(prefix: str) -> list[dict[str, Any]]:
+    """List files directly under `prefix` (an s3:// prefix or a local dir).
+
+    Returns [{uri, size}], files only (directories excluded). Used by the
+    discovery layer so the LLM can find catalog data without being told paths.
+    """
+    if is_s3_uri(prefix):
+        fs = _s3_filesystem()
+        path = prefix[len(_S3_PREFIX):].rstrip("/")
+        try:
+            entries = fs.ls(path, detail=True)
+        except Exception as exc:
+            raise NetCDFIOError(f"could not list {prefix}: {exc}") from exc
+        out: list[dict[str, Any]] = []
+        for e in entries:
+            name = e.get("name") or e.get("Key")
+            if not name:
+                continue
+            if e.get("type") == "directory":
+                continue
+            size = int(e.get("size") or e.get("Size") or 0)
+            out.append({"uri": _S3_PREFIX + name, "size": size})
+        return out
+
+    p = Path(_strip_file_scheme(prefix))
+    if not p.is_dir():
+        raise NetCDFIOError(f"not a directory: {prefix}")
+    return [
+        {"uri": str(f), "size": f.stat().st_size}
+        for f in sorted(p.iterdir())
+        if f.is_file()
+    ]

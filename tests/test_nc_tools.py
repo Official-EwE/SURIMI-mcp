@@ -121,6 +121,7 @@ def test_all_tools_listed_in_registry():
     """nc_tools should expose a TOOLS list naming every callable for server.py
     to register via @mcp.tool()."""
     expected = {
+        "nc_list_files",
         "nc_describe_file", "nc_list_variables", "nc_get_time_range",
         "nc_get_spatial_bounds", "nc_check_cf_compliance",
         "nc_get_coverage_summary",

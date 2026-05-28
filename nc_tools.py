@@ -12,9 +12,30 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from netcdf import analytics, inspect as nc_inspect
+from netcdf import analytics, discovery, inspect as nc_inspect
 from receipts import verify_receipt
 from signed_tool import with_receipt
+
+
+# Default catalog prefix the discovery tool lists. Override with env so a
+# fresh deploy points at its own MinIO bucket without code changes.
+DEFAULT_NETCDF_PREFIX = os.environ.get(
+    "SURIMI_NETCDF_PREFIX", "s3://project-surimi/NetCDF/"
+)
+
+
+# ---------- Discovery (unsigned) ----------
+
+def nc_list_files(prefix: str | None = None) -> dict[str, Any]:
+    """List the netcdf catalog so you can find a file from a plain question.
+
+    Returns {prefix, count, files:[{uri, size, kind}]} where kind is
+    'data', 'mask', or 'other'. Call this FIRST when asked about ocean/
+    biomass/gridded data, then nc_describe_file on a chosen 'data' file to
+    see its variables, then an analytical tool (e.g. nc_top_regions) with a
+    matching 'mask' file. Defaults to the SURIMI NetCDF bucket.
+    """
+    return discovery.list_netcdf_files(prefix or DEFAULT_NETCDF_PREFIX)
 
 
 # ---------- Inspection (unsigned) ----------
@@ -74,6 +95,7 @@ def nc_verify(receipt: dict[str, Any]) -> dict[str, Any]:
 # ---------- Registry ----------
 
 TOOLS = [
+    "nc_list_files",
     "nc_describe_file",
     "nc_list_variables",
     "nc_get_time_range",
