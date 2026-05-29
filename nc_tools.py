@@ -94,8 +94,33 @@ def nc_get_coverage_summary(path: str) -> dict[str, Any]:
 
 # ---------- Analytical (signed) ----------
 
+def _nc_time_series_cube(
+    file: str,
+    var: str,
+    region: str,
+    agg_per_step: str,
+    mask_file: str,
+) -> dict[str, Any]:
+    """Time series of `var` within one region, returned as a compact cube slice.
+
+    Returns a `summary` (n_points, n_valid, value_start/end/min/max/mean,
+    slope_per_step, direction) and `by_year` (one pivotable row per calendar
+    year: {year, value, n_steps}) plus provenance. Present the summary and the
+    by_year rows (a small table or chart); cite the single receipt for the whole
+    block. The raw per-step series is intentionally NOT returned -- a global file
+    has hundreds of monthly steps and enumerating them floods the reply. For
+    "is it increasing/decreasing" or "what is the trend" use nc_trend (it adds a
+    significance test and reads the full series internally).
+    """
+    result = analytics.time_series(
+        file=file, var=var, region=region,
+        agg_per_step=agg_per_step, mask_file=mask_file,
+    )
+    return {k: v for k, v in result.items() if k != "points"}
+
+
 nc_top_regions = with_receipt("nc_top_regions")(analytics.top_regions)
-nc_time_series = with_receipt("nc_time_series")(analytics.time_series)
+nc_time_series = with_receipt("nc_time_series")(_nc_time_series_cube)
 nc_compare_periods = with_receipt("nc_compare_periods")(analytics.compare_periods)
 nc_trend = with_receipt("nc_trend")(analytics.nc_trend)
 

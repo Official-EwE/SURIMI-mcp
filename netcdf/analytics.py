@@ -10,7 +10,9 @@ Provenance is wrapped by the receipts module at the MCP tool layer.
 """
 from __future__ import annotations
 
+import logging
 import math
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -18,6 +20,8 @@ import xarray as xr
 
 from netcdf import io as ncio
 from netcdf.regions import RegionMaskError, load_region_mask
+
+_log = logging.getLogger(__name__)
 
 
 class AnalyticsError(Exception):
@@ -65,17 +69,45 @@ def _calendar_years(decoded: np.ndarray) -> np.ndarray:
     return decoded.astype("datetime64[Y]").astype(int) + 1970
 
 
+def _find_time_name(ds: xr.Dataset) -> str | None:
+    """Name of the dataset's time coordinate/dimension, or None if absent."""
+    for cand in ("time", "t", "T"):
+        if cand in ds.coords or cand in ds.dims:
+            return cand
+    return None
+
+
+def _decode_years(ds: xr.Dataset) -> np.ndarray | None:
+    """Calendar year per timestep for the dataset's time axis.
+
+    Returns None if there is no time coordinate or it lacks CF `units` (so the
+    caller falls back to no rollup). Reuses the same CF decoding as the year
+    filter so noleap/360_day calendars resolve to correct years.
+    """
+    tname = _find_time_name(ds)
+    if tname is None:
+        return None
+    t = ds[tname]
+    units = t.attrs.get("units")
+    if not units:
+        return None
+    calendar = t.attrs.get("calendar", "standard")
+    try:
+        decoded = xr.coding.times.decode_cf_datetime(t.values, units, calendar)
+    except Exception as exc:
+        # Graceful fallback to no rollup, but make the cause observable.
+        _log.warning("could not decode time axis for year rollup: %s", exc)
+        return None
+    return _calendar_years(decoded)
+
+
 def _time_indices_for_year(ds: xr.Dataset, year: int) -> np.ndarray:
     """Indices along the time axis whose decoded calendar year == year.
 
     Dataset is opened with decode_times=False, so we decode the raw time
     coordinate via CF units here (lazy enough; the time axis is small).
     """
-    tname = None
-    for cand in ("time", "t", "T"):
-        if cand in ds.coords or cand in ds.dims:
-            tname = cand
-            break
+    tname = _find_time_name(ds)
     if tname is None:
         raise AnalyticsError("no time coordinate to filter by year")
     t = ds[tname]
@@ -133,6 +165,33 @@ def _series_summary(points: list[dict[str, Any]]) -> dict[str, Any]:
         }
     )
     return summary
+
+
+def _rollup_by_year(
+    values: np.ndarray | Sequence[float],
+    years: np.ndarray | Sequence[int],
+    agg: str,
+) -> list[dict[str, Any]]:
+    """Roll a per-timestep series up into per-year aggregates (a cube slice).
+
+    Groups `values` by calendar `year` (the cube dimension) and applies `agg`
+    over the finite values in each year, producing a measure per year. NaN steps
+    (real data gaps) are excluded from the aggregate but still counted in
+    n_steps. A year with no finite step reports value=None (not NaN, never
+    raises). Rows are returned year-ascending so a multi-decade monthly file
+    collapses to a few dozen summarisable rows instead of hundreds of raw points
+    -- the model can pivot/slice these without hallucinating.
+    """
+    vals = np.asarray(values, dtype=float)
+    yrs = np.asarray(years)
+    rows: list[dict[str, Any]] = []
+    for y in sorted(np.unique(yrs).tolist()):
+        sel = yrs == y
+        subset = vals[sel]
+        finite = subset[np.isfinite(subset)]
+        value = _apply_agg(finite, agg) if finite.size else None
+        rows.append({"year": int(y), "value": value, "n_steps": int(sel.sum())})
+    return rows
 
 
 def _region_index(mask: dict[str, Any], region: str) -> int:
@@ -282,6 +341,16 @@ def time_series(
         tdim = var_da.dims[0]
         n_steps = var_da.sizes[tdim]
         time_values = ds["time"].values if "time" in ds else None
+        years = _decode_years(ds)
+        # The time coord may belong to a different-length dimension than the
+        # variable's leading dim on a non-standard file; a mismatch would make
+        # the year mask misalign with the points. Fall back to no rollup.
+        if years is not None and len(years) != n_steps:
+            _log.warning(
+                "time axis length %d != variable steps %d; skipping year rollup",
+                len(years), n_steps,
+            )
+            years = None
 
         region_mask = mask_info["mask"][r_idx]
         points: list[dict[str, Any]] = []
@@ -294,8 +363,19 @@ def time_series(
             ts = float(time_values[t]) if time_values is not None else float(t)
             points.append({"t": ts, "value": val})
 
+    by_year = (
+        _rollup_by_year(
+            np.array([p["value"] for p in points], dtype=float),
+            years,
+            agg_per_step,
+        )
+        if years is not None
+        else []
+    )
+
     return {
         "summary": _series_summary(points),
+        "by_year": by_year,
         "points": points,
         "provenance": {
             "file_sha256": _file_sha256(file),
