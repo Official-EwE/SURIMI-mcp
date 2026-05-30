@@ -99,10 +99,10 @@ capabilities.register(capabilities.DataSourceCapability(
 
 capabilities.register(capabilities.DataSourceCapability(
     source_id="meta",
-    title="Self-description",
+    title="Self-description and receipt verification",
     domain="meta",
-    description="Capability introspection for client discovery.",
-    tools=("describe_capabilities",),
+    description="Capability introspection for client discovery, and receipt verification.",
+    tools=("describe_capabilities", "verify"),
     coverage={},
 ))
 
@@ -229,13 +229,27 @@ def generate_report(
     return recipes.generate_report(dataset_id, focus, period=period)
 
 
-# ── NetCDF tools (inspection + signed analytics + verify) ──
+# ── Receipt verify ──
+# NetCDF/gridded ocean-data tools moved to the separate surimi-netcdf-mcp
+# server (DB-free, S3-only). This server is tabular fisheries data only;
+# both share SURIMI_RECEIPT_SECRET so receipts verify identically.
 
-import nc_tools as _nc
+from receipts import verify_receipt as _verify_receipt
 
-for _name in _nc.TOOLS:
-    _fn = getattr(_nc, _name)
-    mcp.tool(name=_name)(_fn)
+
+@mcp.tool(name="verify")
+def verify(receipt: dict) -> dict:
+    """Verify a signed receipt against this server's secret.
+
+    Returns {verified: bool, reason: str}. Never raises on signature mismatch.
+    Works on any SURIMI receipt (this server's query_data, or the
+    surimi-netcdf-mcp tools) since both share SURIMI_RECEIPT_SECRET.
+    """
+    import os
+    raw = os.environ.get("SURIMI_RECEIPT_SECRET", "")
+    if not raw:
+        return {"verified": False, "reason": "secret_not_configured"}
+    return _verify_receipt(receipt, secret=raw.encode("utf-8"))
 
 
 # ── Signed SQL tool ──
@@ -254,7 +268,7 @@ def query_data(sql: str, limit: int = 500) -> dict:
 
     value holds rows/columns (and available_columns on a column error, for
     self-correction). receipt is an HMAC signature over the inputs+output so
-    any number can be re-verified with nc_verify. Use SHOW COLUMNS FROM
+    any number can be re-verified with the `verify` tool. Use SHOW COLUMNS FROM
     <table> to discover names; double-quote dot-notation columns.
     """
     _log(f"[fetcher signed] query_data sql={sql[:80]}...")
